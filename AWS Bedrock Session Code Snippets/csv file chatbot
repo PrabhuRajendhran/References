@@ -1,0 +1,235 @@
+cd ~/environment/stream11_working_with_csv_files
+python3.9 -m pip install -r requirements.txt --upgrade
+import pandas as pd
+
+# Load the CSV file
+df = pd.read_csv('SampleData/claimdata.csv')
+
+# Print the first 5 rows
+print(df.head())
+python print_dataframe.py
+
+app.py
+
+import streamlit as st
+import boto3
+import json
+import os
+from querycsv import query_csv
+
+# CSS for the chat interface and responses
+st.markdown('''
+<style>
+.chat-message {padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1rem; display: flex}
+.chat-message.user {background-color: #2b313e}
+.chat-message.bot {background-color: #475063}
+.chat-message .avatar {width: 20%}
+.chat-message .avatar img {max-width: 78px; max-height: 78px; border-radius: 50%; object-fit: cover}
+.chat-message .message {width: 80%; padding: 0 1.5rem; color: #fff}
+.response, .url {padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;}
+</style>
+''', unsafe_allow_html=True)
+
+# Message templates
+bot_template = '''
+<div class="chat-message bot">
+    <div class="avatar">
+        <img src="https://i.ibb.co/cN0nmSj/Screenshot-2023-05-28-at-02-37-21.png">
+    </div>
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+user_template = '''
+<div class="chat-message user">
+    <div class="avatar">
+        <img src="https://i.ibb.co/wRtZstJ/Aurora.png">
+    </div>    
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+st.title("Chat with CSV File")
+
+session = boto3.session.Session()
+region_name = session.region_name
+bedrock_client = boto3.client('bedrock-agent-runtime')
+
+# Initialize conversation history if not present
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+
+user_input = st.text_input("You: ")
+
+if st.button("Send") :
+
+    csv_file_name = "claimdata.csv"
+    response = query_csv(f"SampleData/{csv_file_name}",user_input,st.session_state.conversation_history)
+
+    print("Response is : " + response)
+
+    display_text =  response
+
+    # Insert the response at the beginning of the conversation history
+    st.session_state.conversation_history.insert(0, ("Assistant", f"<div class='response'>{display_text}</div>"))
+    st.session_state.conversation_history.insert(0, ("You", user_input))
+
+    # Display conversation history
+    for speaker, text in st.session_state.conversation_history:
+        if speaker == "You":
+            st.markdown(user_template.replace("{{MSG}}", text), unsafe_allow_html=True)
+        else:
+            st.markdown(bot_template.replace("{{MSG}}", text), unsafe_allow_html=True)
+
+querycsv.py
+
+import boto3
+import pprint
+from botocore.client import Config
+import json
+import argparse
+import pandas as pd
+import re
+import sys
+from io import StringIO
+import contextlib
+from contextlib import redirect_stdout
+
+
+pp = pprint.PrettyPrinter(indent=4)
+
+def get_bedrock_client():
+    session = boto3.session.Session()
+    region = session.region_name
+    bedrock_config = Config(connect_timeout=120, read_timeout=120, retries={'max_attempts': 0})
+    bedrock_client = boto3.client('bedrock-runtime', 
+                                  region_name = region)
+    
+    return bedrock_client
+
+def invoke_claude_llm(bedrock_client,
+                      messages,
+                      modelId ='anthropic.claude-instant-v1',
+                      accept = 'application/json',
+                      contentType = 'application/json',
+                      max_tokens = 4096,
+                      temperature = 0,
+                     ):
+
+    payload = json.dumps({
+    "anthropic_version": "bedrock-2023-05-31",
+    "max_tokens": max_tokens,
+    "temperature": temperature,
+    "top_p": 0,
+    "messages": messages})
+    
+    response = bedrock_client.invoke_model(
+        body=payload, 
+        modelId=modelId, 
+        accept=accept, 
+        contentType=contentType)
+    
+    response_body = json.loads(response.get('body').read())
+    response_text = response_body.get('content')
+    
+    return response_text
+
+def get_text_payload(text=None):
+    content=None
+    if text.strip():
+        content = {
+        "type":"text",
+        "text": text.strip()
+        }
+    return content
+
+def create_claude_message(prompt):
+    
+    messages = [
+                { "role":"user", 
+                  "content":prompt
+                }]
+    return messages
+
+bedrock_client = get_bedrock_client()
+
+SystemPromptTemplate = """
+<Instructions>
+You are an expert programmer in Python and use the Pandas library to create programs to process CSV files and extract the data corresponding to user question. You can only answer with an executable Python program which you always put inside the tags <code></code>. 
+Avoid comments and do not explain the code. The output of the program should be human readable and using markdown formatting when possible.
+
+You have been give data in the file {file} with the following fields: {fields}
+
+Answer the <question> using the data provided in above file  
+
+</Instructions>
+
+<question>
+{question}
+</question>
+"""
+
+def gen_program(csvfile, question, history=""):
+
+    data = pd.read_csv(csvfile).sample(n=10)
+
+    fdata = data.dtypes.to_string()
+    fdata = fdata.replace("object", "str")
+    fdata = fdata + "\n" + data.head(2).to_string()
+    
+    prompt = SystemPromptTemplate.format( 
+                                            file=csvfile,
+                                            # fields="\n".join(list(data.columns)),
+                                            fields="\n" + fdata,
+                                            question= question
+                                        )
+    
+    prompt = prompt + "\n Please consider following chat history for the context : " + "\n" + str(history)
+                            
+    messages = create_claude_message(prompt)
+    resp = invoke_claude_llm(bedrock_client,messages)
+    resp = resp[0]['text']
+    
+    return f'```py\n{re.search(r"<code>(.*)</code>", resp, re.MULTILINE | re.DOTALL).groups(0)[0]}\n```'
+    
+def query_csv(csvfile, question, history=""):
+    pythoncode = gen_program(csvfile, question, history)
+    pythoncode = "\n".join(pythoncode.split("\n")[1:-1])
+
+    print("### Pythoncode ##")
+    print(pythoncode)
+
+    print("### LLM Response ##")
+    content = "Sorry, I have not been able to answer your question. Would you mind trying again?"
+
+    try:
+        stdout = StringIO()
+        _locals = locals()
+        with redirect_stdout(stdout):
+           exec(pythoncode, globals(), _locals)
+        content = stdout.getvalue()
+
+    except Exception as ex:
+        print(ex)
+
+    return content
+
+
+if __name__ == "__main__":
+    # Accept the argument from command line
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", type=str, required=True)
+    parser.add_argument("--question", type=str, default="How Many Rows are there?")
+    
+    args = parser.parse_args()
+    
+    if args.file:
+        csvfile = args.file
+    if args.question:
+        question = args.question
+    
+    content = query_csv(csvfile, question)
+    print(content)
+
+streamlit run app.py
+
