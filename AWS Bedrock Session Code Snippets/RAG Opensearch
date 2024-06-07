@@ -1,0 +1,221 @@
+cd ~/environment/stream2_working_with_private_documents/bedrock_and_opensearch/
+
+python3.9 -m pip install -r requirements.txt --upgrade
+
+streamlit==1.23.0
+langchain-community
+wikipedia
+opensearch-py
+requests_aws4auth
+awscurl
+fpdf
+
+REGION=$(aws configure get region)
+echo $REGION
+AOSSENDPOINT=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`OpenSearchCollectionEndpoint`].OutputValue' \
+  --output text)
+echo $AOSSENDPOINT
+ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`AmazonBedrockExecutionRoleARN`].OutputValue' \
+  --output text)
+echo $ROLE_ARN
+OPENSEARCH_COLLECTION_ARN=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`OpenSearchCollectionArn`].OutputValue' \
+  --output text)
+echo $OPENSEARCH_COLLECTION_ARN
+OPENSEARCH_S3_BUCKET_ARN=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`OpenSearchS3BucketARN`].OutputValue' \
+  --output text)
+echo $OPENSEARCH_S3_BUCKET_ARN
+OpenSearch_BUCKET_NAME=$(aws cloudformation describe-stacks --stack-name using-genai-for-private-files-workshop --query "Stacks[0].Outputs[?OutputKey=='OpenSearchS3Bucket'].OutputValue" --output text)
+echo $OpenSearch_BUCKET_NAME
+
+Next, run the following command to create a vector index in Amazon OpenSearch Serverless using awscurl library. Index is a collection of documents with a common data schema that provides a way for you to store, search, and retrieve your vector embeddings and other fields. You can create and upload data to indexes in an OpenSearch Serverless collection by using an HTTP tool such as Postman or awscurl.
+awscurl --service aoss --region $REGION -H "Content-Type: application/json" -X PUT $AOSSENDPOINT/workshop_index -d '{"settings": {"index": {"knn": true, "knn.algo_param.ef_search": 512}}, "mappings": {"properties": {"documentid": {"type": "knn_vector", "dimension": 1536, "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"}}, "workshop-data": {"type": "text", "index": "true"}, "workshop-metadata": {"type": "text", "index": "false"}}}}' 
+
+Run the following command to create a knowledge base. Knowledge base for Amazon Bedrock provides you the capability of amassing data sources into a repository of information. With knowledge bases, you can easily build an application that takes advantage of retrieval augmented generation (RAG), a technique in which the retrieval of information from data sources augments the generation of model responses. Once set up, you can take advantage of a knowledge base in the following ways.
+                         
+KNOWLEDGE_BASE_ID=$(aws bedrock-agent create-knowledge-base \
+  --name workshop-aoss-knowledge-base \
+  --role-arn $ROLE_ARN \
+  --knowledge-base-configuration 'type=VECTOR,vectorKnowledgeBaseConfiguration={embeddingModelArn="arn:aws:bedrock:'${REGION}'::foundation-model/amazon.titan-embed-text-v1"}' \
+  --storage-configuration "type=OPENSEARCH_SERVERLESS,opensearchServerlessConfiguration={collectionArn='${OPENSEARCH_COLLECTION_ARN}',vectorIndexName='workshop_index',fieldMapping={vectorField='documentid',textField='workshop-data',metadataField='workshop-metadata'}}" \
+  | jq -r '.knowledgeBase.knowledgeBaseId')
+echo $KNOWLEDGE_BASE_ID
+
+Follow the steps below to add a secret value in secrets manager
+
+Go to the AWS Secrets Manager Console 
+Click on opensearch_serverless_secrets secret
+Under Secret value click Retrieve secret value
+Then, click Edit
+Click + Add row
+For key type KNOWLEDGE_BASE_ID and for the value paste the value of KNOWLEDGE_BASE_ID printed in the terminal above
+Click Save
+
+
+After you create knowledge base, you ingest the data sources into knowledge base so that they are indexed and able to be queried. Run the following command to create data source for the knowledge base. Data source helps connect your raw documents in Amazon S3 bucket to the knowledge base
+
+aws bedrock-agent create-data-source \
+  --knowledge-base-id $KNOWLEDGE_BASE_ID \
+  --name workshop-kb-data-source \
+  --data-source-configuration "type=S3,s3Configuration={bucketArn=${OPENSEARCH_S3_BUCKET_ARN}}"
+DATA_SOURCE_ID=$(aws bedrock-agent list-data-sources --knowledge-base-id $KNOWLEDGE_BASE_ID | jq -r '.dataSourceSummaries[0].dataSourceId')
+echo $DATA_SOURCE_ID
+
+
+
+app.py
+
+
+import streamlit as st
+import boto3
+import json
+import os
+
+# CSS for the chat interface and responses
+st.markdown('''
+<style>
+.chat-message {padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1rem; display: flex}
+.chat-message.user {background-color: #2b313e}
+.chat-message.bot {background-color: #475063}
+.chat-message .avatar {width: 20%}
+.chat-message .avatar img {max-width: 78px; max-height: 78px; border-radius: 50%; object-fit: cover}
+.chat-message .message {width: 80%; padding: 0 1.5rem; color: #fff}
+.response, .url {background-color: #f0f0f0; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;}
+</style>
+''', unsafe_allow_html=True)
+
+# Message templates
+bot_template = '''
+<div class="chat-message bot">
+    <div class="avatar">
+        <img src="https://i.ibb.co/cN0nmSj/Screenshot-2023-05-28-at-02-37-21.png">
+    </div>
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+user_template = '''
+<div class="chat-message user">
+    <div class="avatar">
+        <img src="https://i.ibb.co/wRtZstJ/Aurora.png">
+    </div>    
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+secret_name = "opensearch_serverless_secrets"
+
+st.title("Chat with Bedrock Knowledge Base")
+
+session = boto3.session.Session()
+region_name = session.region_name
+bedrock_client = boto3.client('bedrock-agent-runtime')
+
+client = session.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+get_secret_value_response = client.get_secret_value(
+    SecretId=secret_name
+)
+
+secret = get_secret_value_response['SecretString']
+parsed_secret = json.loads(secret)
+
+knowledge_base_id = parsed_secret["KNOWLEDGE_BASE_ID"]
+
+# Initialize conversation history if not present
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+
+user_input = st.text_input("You: ")
+
+if st.button("Send"):
+    # Retrieve and Generate call
+    response = bedrock_client.retrieve_and_generate(
+        input={"text": user_input},
+        retrieveAndGenerateConfiguration={
+            "knowledgeBaseConfiguration": {
+                "knowledgeBaseId": knowledge_base_id,
+                "modelArn": f"arn:aws:bedrock:{region_name}::foundation-model/anthropic.claude-v2"
+            },
+            "type": "KNOWLEDGE_BASE"
+        }
+    )
+    print(response)
+    # Extract response
+    response_text = response['output']['text']
+
+    # Check if there are any retrieved references
+    if not response['citations'][0]['retrievedReferences']:
+        # No references found, use the response text
+        display_text = response_text
+    else:
+        # Handle normal case with references
+        # Extract S3 URI (assuming references are present)
+        s3_uri = response['citations'][0]['retrievedReferences'][0]['location']['s3Location']['uri']
+        display_text = f"{response_text}<br><br>Reference: {s3_uri}"
+
+    # Insert the response at the beginning of the conversation history
+    st.session_state.conversation_history.insert(0, ("Assistant", f"<div class='response'>{display_text}</div>"))
+    st.session_state.conversation_history.insert(0, ("You", user_input))
+
+    # Display conversation history
+    for speaker, text in st.session_state.conversation_history:
+        if speaker == "You":
+            st.markdown(user_template.replace("{{MSG}}", text), unsafe_allow_html=True)
+        else:
+            st.markdown(text, unsafe_allow_html=True)
+
+
+cd ~/environment/stream2_working_with_private_documents/bedrock_and_opensearch/
+
+python download_dataset.py
+
+  import wikipedia
+from langchain_community.retrievers import WikipediaRetriever
+from fpdf import FPDF
+
+retriever = WikipediaRetriever(doc_content_chars_max=10000)
+
+def download_wikipedia_pages(page_title):
+    docs = retriever.get_relevant_documents(query=page_title) 
+    if docs:
+        content = docs[0].page_content
+    return content
+
+def save_as_pdf(title, content):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, title)
+    pdf.ln(10)
+    pdf.multi_cell(0, 10, content)
+    filename = title.replace(" ", "_")
+    pdf.output(f"./docs/{filename}.pdf")  # Use the title for the PDF filename
+
+def download_wikipedia_pages_to_pdf(pages):
+    for page_title in pages:
+        content = download_wikipedia_pages(page_title)
+        if content:
+            content = content.encode('latin-1', 'replace').decode('latin-1')
+            save_as_pdf(page_title, content)
+            print(f"Downloaded and saved {page_title} as PDF.")
+
+# List of Wikipedia pages to download
+pages_to_download = ["Hong Kong", "London", "Singapore", "New York City"]  # Add more page titles as needed
+
+download_wikipedia_pages_to_pdf(pages_to_download)
+
+
+aws s3 cp ./docs s3://${OpenSearch_BUCKET_NAME}/ --recursive
+aws bedrock-agent start-ingestion-job --knowledge-base-id $KNOWLEDGE_BASE_ID --data-source-id $DATA_SOURCE_ID
+streamlit run app.py
