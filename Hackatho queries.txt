@@ -1,0 +1,40 @@
+Llamaindex, Llamaparse
+Langchain
+groq
+data
+openai
+gpu capacity
+google search
+
+
+Load - Llamaindex, Llamaparse
+Store - S3
+Lamda triggers to chuk ad emed
+
+Chuk - Recursive or Sematic
+Store - Processed cotet
+Lamda triggers to 
+
+Emed - 
+Store - Emedded cotet
+
+retriever  Reraker
+advaced rag 
+aget [https://medium.com/@meirgotroot/llamaindex-for-agentic-rag-and-more-6a177dffdd3a]
+
+llm - call edrock api / groq
+
+orchestrate - llamaidex or lagchai
+
+halluciate avoid - guardrails
+
+secure - cert ad toke
+
+gaurdrails 
+[https://github.com/NVIDIA/NeMo-Guardrails/blob/develop/docs/user_guides/langchain/runnable-as-action/README.md]
+[https://medium.aiplanet.com/retrieval-augmented-pipeline-with-actions-using-nemo-gaurdrails-447b84a5334b]
+
+lagsmith
+
+
+

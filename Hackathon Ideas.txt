@@ -1,0 +1,30 @@
+https://community.aws/tutorials/build-a-knowledge-base-with-multilingual-q-and-a-gen-ai
+
+https://github.com/krishnaik06/Generative-AI-With-Cloud/tree/main
+
+https://github.com/krishnaik06/AWS-Bedrock
+
+https://github.com/KxSystems/kdbai-samples [https://www.youtube.com/watch?app=desktop&v=jqgdUhx5Eq4]
+
+https://www.youtube.com/watch?v=sVcwVQRHIc8&pp=ygUJbGFuZ2NoYWlu
+
+https://www.youtube.com/watch?v=jSP-gSEyVeI&pp=ygURbGFuZ2NoYWluIGFnZW50cyA%3D
+
+
+Steps :
+1. Ingest - pdfs
+2. Chunk - recursivechartextsplitter
+3. Embed - titan
+4. Index - vector db : FAISS, Chroma, Pinecone, PGVector
+5. Prompt 
+6. LLM - Claude, Llama
+7. Write Response 
+
+UI - Streamlit
+Orchestratio - Langchain
+LLM Platform - bedrock
+Other AWS Services - API Gateway, Lambda, S3, Cloudwatch
+
+Use Case : Knowledge base, Chatbot, Summarization
+
+
