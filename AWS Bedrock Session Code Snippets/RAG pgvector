@@ -1,0 +1,275 @@
+https://catalog.workshops.aws/genai-on-aws/en-US/04-working-with-private-documents/02-using-postgresql/01-configure-application
+
+cd ~/environment/stream2_working_with_private_documents/bedrock_and_pgvector/
+
+python3.9 -m pip install -r requirements.txt
+
+streamlit
+langchain==0.0.229
+PyPDF2==3.0.1
+python-dotenv
+psycopg2-binary==2.9.6
+altair==4.0
+pgvector==0.1.8
+InstructorEmbedding==1.0.1
+sentence-transformers==2.2.2
+urllib3==1.26.6
+langchain-community
+wikipedia
+fpdf
+
+download_dataset.py
+
+import wikipedia
+from langchain_community.retrievers import WikipediaRetriever
+from fpdf import FPDF
+
+retriever = WikipediaRetriever(doc_content_chars_max=10000)
+
+def download_wikipedia_pages(page_title):
+    docs = retriever.get_relevant_documents(query=page_title) 
+    if docs:
+        content = docs[0].page_content
+    return content
+
+def save_as_pdf(title, content):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, title)
+    pdf.ln(10)
+    pdf.multi_cell(0, 10, content)
+    filename = title.replace(" ", "_")
+    pdf.output(f"./docs/{filename}.pdf")  # Use the title for the PDF filename
+
+def download_wikipedia_pages_to_pdf(pages):
+    for page_title in pages:
+        content = download_wikipedia_pages(page_title)
+        if content:
+            content = content.encode('latin-1', 'replace').decode('latin-1')
+            save_as_pdf(page_title, content)
+            print(f"Downloaded and saved {page_title} as PDF.")
+
+# List of Wikipedia pages to download
+pages_to_download = ["Hong Kong", "London", "Singapore", "New York City"]  # Add more page titles as needed
+
+download_wikipedia_pages_to_pdf(pages_to_download)
+
+Run the following command in the terminal to install postgres and psql on this Cloud9 instance.
+sudo amazon-linux-extras enable postgresql12
+sudo yum clean metadata
+sudo yum install postgresql
+psql --version
+
+run the below command to set the required environment variables.
+ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`AmazonBedrockExecutionRoleARN`].OutputValue' \
+  --output text)
+echo $ROLE_ARN
+REGION=$(aws configure get region)
+echo $REGION
+Aurora_Cluster_Writer_Endpoint=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`AuroraDBWriterEndpoint`].OutputValue' \
+  --output text)
+echo $Aurora_Cluster_Writer_Endpoint
+Aurora_Cluster_Arn=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`AuroraDBClusterARN`].OutputValue' \
+  --output text)
+echo $Aurora_Cluster_Arn
+Postgres_Bucket_Name=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`WorkshopPostgreS3BucketName`].OutputValue' \
+  --output text)
+echo $Postgres_Bucket_Name
+Postgres_Bucket_Arn=$(aws cloudformation describe-stacks \
+  --stack-name 'using-genai-for-private-files-workshop' \
+  --query 'Stacks[0].Outputs[?OutputKey==`WorkshopPostgreS3BucketARN`].OutputValue' \
+  --output text)
+echo $Postgres_Bucket_Arn
+DB_Password=$(aws secretsmanager get-secret-value --secret-id postgres_vectors_secrets --query SecretString --output text | jq -r .password)
+echo "DB_Password: $DB_Password"
+
+Use the following command in the terminal to connect to the DB cluster and use the use the password printed in the terminal above
+psql -h $Aurora_Cluster_Writer_Endpoint -d postgres -U workshopUser -p 3306
+
+To create an extension named "vector" in a PostgreSQL database, run the following command in Cloud9 terminal.
+CREATE EXTENSION IF NOT EXISTS vector;
+
+Use the following command to retrieve the version number of the installed 'vector' extension in a PostgreSQL database.
+SELECT extversion FROM pg_extension WHERE extname='vector';
+
+Run the following command in Cloud9 terminal to create a new schema named bedrock_integration in a PostgreSQL database
+CREATE SCHEMA bedrock_integration;
+
+In the Cloud9 terminal, enter the following command to create a new user and grant required permissions
+CREATE ROLE bedrock_user WITH PASSWORD 'workshoppassword@1' LOGIN;
+GRANT ALL ON SCHEMA bedrock_integration to bedrock_user;
+
+
+Then log in using the new user and password you just created.
+\q 
+psql -h $Aurora_Cluster_Writer_Endpoint -d postgres -U bedrock_user -p 3306
+
+Now, create a table with the right schema using the below command in the Cloud9 terminal.
+CREATE TABLE bedrock_integration.bedrock_kb (id uuid PRIMARY KEY, embedding vector(1536), chunks text, metadata json);
+
+Create an index named bedrock_kb on the embedding column of a table within the bedrock_integration schema, using the vector_cosine_ops operator class in PostgreSQL
+CREATE INDEX on bedrock_integration.bedrock_kb USING hnsw (embedding vector_cosine_ops);
+\q
+
+Add the secrets to secrets manager
+Go to the AWS Secrets Manager Console 
+Click the button Store a new secret
+Select secret type as Credentials for Amazon RDS database
+Provide the username bedrock_user and password workshoppassword@1
+Under Database, select workshopdbcluster
+Click Next and provide secret name postgres_kb_secret
+Click Next > Next > Store
+
+To retrieve the ARN of the secrets you created above, use the following command in your Cloud9 terminal.
+SECRET_ARN=$(aws secretsmanager list-secrets --query 'SecretList[?Name==`postgres_kb_secret`].ARN' --output text)
+echo $SECRET_ARN
+
+To create knowledge base in Amazon Bedrock, use the following command in Cloud9 terminal.
+Knowledge_Base_Id=$(aws bedrock-agent create-knowledge-base \
+  --name workshop-aurora-knowledge-base \
+  --role-arn $ROLE_ARN \
+  --knowledge-base-configuration 'type=VECTOR,vectorKnowledgeBaseConfiguration={embeddingModelArn="arn:aws:bedrock:'"$REGION"'::foundation-model/amazon.titan-embed-text-v1"}' \
+  --storage-configuration 'type=RDS,rdsConfiguration={resourceArn='"$Aurora_Cluster_Arn"',credentialsSecretArn='"$SECRET_ARN"',databaseName=postgres,tableName=bedrock_integration.bedrock_kb,fieldMapping={primaryKeyField=id,vectorField=embedding,textField=chunks,metadataField=metadata}}'\
+  | jq -r '.knowledgeBase.knowledgeBaseId')
+  echo $Knowledge_Base_Id
+
+
+Follow the steps below to add a secret value in secrets manager
+
+Go to the AWS Secrets Manager Console 
+Click on postgres_vectors_secrets secret
+Under Secret value click Retrieve secret value
+Then, click Edit
+Click + Add row
+For key type KNOWLEDGE_BASE_ID and for the value paste the value of KNOWLEDGE_BASE_ID printed in the terminal above
+Click Save
+
+
+To create a data store within the knowledge base, use the following command in Cloud9 terminal.
+Data_Source_Id=$(aws bedrock-agent create-data-source \
+  --knowledge-base-id $Knowledge_Base_Id \
+  --name workshop-aurora-kb-data-source \
+  --data-source-configuration "type=S3,s3Configuration={bucketArn='"$Postgres_Bucket_Arn"'}" \
+  --vector-ingestion-configuration "chunkingConfiguration={chunkingStrategy=NONE}" \
+  | jq -r '.dataSource.dataSourceId')
+echo $Data_Source_Id
+
+app.py
+
+import streamlit as st
+import boto3
+import json
+import os
+
+# CSS for the chat interface and responses
+st.markdown('''
+<style>
+.chat-message {padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1rem; display: flex}
+.chat-message.user {background-color: #2b313e}
+.chat-message.bot {background-color: #475063}
+.chat-message .avatar {width: 20%}
+.chat-message .avatar img {max-width: 78px; max-height: 78px; border-radius: 50%; object-fit: cover}
+.chat-message .message {width: 80%; padding: 0 1.5rem; color: #fff}
+.response, .url {background-color: #f0f0f0; padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem;}
+</style>
+''', unsafe_allow_html=True)
+
+# Message templates
+bot_template = '''
+<div class="chat-message bot">
+    <div class="avatar">
+        <img src="https://i.ibb.co/cN0nmSj/Screenshot-2023-05-28-at-02-37-21.png">
+    </div>
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+user_template = '''
+<div class="chat-message user">
+    <div class="avatar">
+        <img src="https://i.ibb.co/wRtZstJ/Aurora.png">
+    </div>    
+    <div class="message">{{MSG}}</div>
+</div>
+'''
+
+secret_name = "postgres_vectors_secrets"
+
+st.title("Chat with Bedrock Knowledge-Base")
+
+session = boto3.session.Session()
+region_name = session.region_name
+bedrock_client = boto3.client('bedrock-agent-runtime')
+
+client = session.client(
+    service_name='secretsmanager',
+    region_name=region_name
+)
+
+get_secret_value_response = client.get_secret_value(
+    SecretId=secret_name
+)
+
+secret = get_secret_value_response['SecretString']
+parsed_secret = json.loads(secret)
+
+knowledge_base_id = parsed_secret["KNOWLEDGE_BASE_ID"]
+
+# Initialize conversation history if not present
+if 'conversation_history' not in st.session_state:
+    st.session_state.conversation_history = []
+
+user_input = st.text_input("You: ")
+
+if st.button("Send"):
+    # Retrieve and Generate call
+    response = bedrock_client.retrieve_and_generate(
+        input={"text": user_input},
+        retrieveAndGenerateConfiguration={
+            "knowledgeBaseConfiguration": {
+                "knowledgeBaseId": knowledge_base_id,
+                "modelArn": f"arn:aws:bedrock:{region_name}::foundation-model/anthropic.claude-v2"
+            },
+            "type": "KNOWLEDGE_BASE"
+        }
+    )
+    # Extract response
+    response_text = response['output']['text']
+
+    # Check if there are any retrieved references
+    if not response['citations'][0]['retrievedReferences']:
+        # No references found, use the response text
+        display_text = response_text
+    else:
+        # Handle normal case with references
+        # Extract S3 URI (assuming references are present)
+        s3_uri = response['citations'][0]['retrievedReferences'][0]['location']['s3Location']['uri']
+        display_text = f"{response_text}<br><br>Reference: {s3_uri}"
+
+    # Insert the response at the beginning of the conversation history
+    st.session_state.conversation_history.insert(0, ("Assistant", f"<div class='response'>{display_text}</div>"))
+    st.session_state.conversation_history.insert(0, ("You", user_input))
+
+    # Display conversation history
+    for speaker, text in st.session_state.conversation_history:
+        if speaker == "You":
+            st.markdown(user_template.replace("{{MSG}}", text), unsafe_allow_html=True)
+        else:
+            st.markdown(text, unsafe_allow_html=True)
+
+
+cd ~/environment/stream2_working_with_private_documents/bedrock_and_pgvector/
+python download_dataset.py
+aws s3 cp ./docs s3://${Postgres_Bucket_Name}/ --recursive
+aws bedrock-agent start-ingestion-job --knowledge-base-id $Knowledge_Base_Id --data-source-id $Data_Source_Id
+streamlit run app.py
+
